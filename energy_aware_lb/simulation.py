@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Dict
+from typing import Dict, Optional
 
 from .config import RuntimeConfig
 from .orchestrator import EnergyAwareOrchestrator
@@ -15,6 +15,8 @@ def run_simulation(
     seed: int = 42,
     efficient_nodes: int = 12,
     fallback_nodes: int = 3,
+    dataset_csv: Optional[str] = None,
+    dataset_max_points: Optional[int] = None,
 ) -> Dict[str, object]:
     provider = SimulatedProvider(
         provider_name="aws-ec2",
@@ -24,7 +26,13 @@ def run_simulation(
     )
     runtime = RuntimeConfig()
     orchestrator = EnergyAwareOrchestrator(provider=provider, config=runtime)
-    trace = generate_workload_trace(hours=hours, step_minutes=step_minutes, seed=seed)
+    trace = generate_workload_trace(
+        hours=hours,
+        step_minutes=step_minutes,
+        seed=seed,
+        dataset_csv=dataset_csv,
+        dataset_max_points=dataset_max_points,
+    )
 
     for sample in trace:
         orchestrator.process_step(sample)
@@ -37,6 +45,9 @@ def run_simulation(
             "efficient_nodes": efficient_nodes,
             "fallback_nodes": fallback_nodes,
             "seed": seed,
+            "dataset_csv": dataset_csv,
+            "dataset_max_points": dataset_max_points,
+            "total_steps": len(trace),
         },
         "summary": asdict(metrics),
         "first_decisions": [asdict(x) for x in orchestrator.routing_log[:5]],

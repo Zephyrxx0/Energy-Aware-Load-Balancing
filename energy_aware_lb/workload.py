@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from typing import List
+import csv
+import sys
+from pathlib import Path
+from typing import List, Optional
 
 import numpy as np
 
@@ -11,23 +14,17 @@ def generate_workload_trace(
     hours: int = 24,
     step_minutes: int = 5,
     seed: int = 42,
+    dataset_csv: Optional[str] = None,
+    dataset_max_points: Optional[int] = None,
 ) -> List[WorkloadSample]:
-    points = int(hours * 60 / step_minutes)
-    t = np.arange(points, dtype=float)
     rng = np.random.default_rng(seed)
 
-    base = 0.36 + 0.28 * np.sin(2 * np.pi * (t / points) - 0.9)
-    sub_cycle = 0.09 * np.sin(4 * np.pi * (t / points) + 1.1)
-    noise = rng.normal(0.0, 0.04, points)
+    if dataset_csv:
+        cpu = _load_cpu_series_from_csv(Path(dataset_csv), max_points=dataset_max_points)
+    else:
+        cpu = _generate_synthetic_cpu(hours=hours, step_minutes=step_minutes, seed=seed)
 
-    cpu = np.clip(base + sub_cycle + noise, 0.05, 0.98)
-    mem = np.clip(0.45 + 0.35 * cpu + rng.normal(0.0, 0.03, points), 0.1, 0.95)
-
-    for start_ratio, end_ratio, burst in [(0.18, 0.22, 0.18), (0.52, 0.57, 0.14), (0.77, 0.81, 0.21)]:
-        start = int(points * start_ratio)
-        end = int(points * end_ratio)
-        cpu[start:end] = np.clip(cpu[start:end] + burst, 0.0, 1.0)
-
+    mem = np.clip(0.45 + 0.35 * cpu + rng.normal(0.0, 0.03, len(cpu)), 0.1, 0.95)
     latency_budget = 200.0
     step_seconds = step_minutes * 60
 
@@ -38,5 +35,57 @@ def generate_workload_trace(
             mem_demand=float(mem[i]),
             latency_budget_ms=latency_budget,
         )
-        for i in range(points)
+        for i in range(len(cpu))
     ]
+
+
+def _load_cpu_series_from_csv(csv_path: Path, max_points: Optional[int] = None) -> np.ndarray:
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Dataset CSV not found: {csv_path}")
+
+    values: List[float] = []
+    with csv_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames:
+            raise ValueError(f"Dataset CSV has no header: {csv_path}")
+
+        field_map = {name.lower(): name for name in reader.fieldnames}
+        value_col = field_map.get("value") or field_map.get("cpu") or field_map.get("cpu_utilization")
+        if not value_col:
+            raise ValueError(
+                f"Dataset CSV must include one of: value, cpu, cpu_utilization. Found: {reader.fieldnames}"
+            )
+
+        for row in reader:
+            raw = row.get(value_col)
+            if raw is None or raw == "":
+                continue
+            try:
+                values.append(float(raw))
+            except ValueError:
+                continue
+
+            if max_points is not None and len(values) >= max_points:
+                break
+
+    if not values:
+        raise ValueError(f"No numeric values found in dataset CSV column '{value_col}': {csv_path}")
+
+    return np.clip(np.asarray(values, dtype=float), 0.0, 1.0)
+
+
+def _generate_synthetic_cpu(hours: int, step_minutes: int, seed: int) -> np.ndarray:
+    # Prefer the shared generator from implementations/ so both tracks use the same synthetic profile.
+    try:
+        from implementations.data import WorkloadConfig, generate_synthetic_workload
+
+        cfg = WorkloadConfig(hours=hours, step_minutes=step_minutes, seed=seed)
+        return generate_synthetic_workload(cfg)
+    except ModuleNotFoundError:
+        repo_root = Path(__file__).resolve().parents[2]
+        if str(repo_root) not in sys.path:
+            sys.path.insert(0, str(repo_root))
+        from implementations.data import WorkloadConfig, generate_synthetic_workload
+
+        cfg = WorkloadConfig(hours=hours, step_minutes=step_minutes, seed=seed)
+        return generate_synthetic_workload(cfg)
